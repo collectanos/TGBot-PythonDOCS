@@ -5,3 +5,4 @@ reportlab
 Pillow
 requests
 aiosqlite
+python-dotenv
