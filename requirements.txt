@@ -1,0 +1,7 @@
+aiogram==3.13.0
+python-docx
+python-pptx
+reportlab
+Pillow
+requests
+aiosqlite
