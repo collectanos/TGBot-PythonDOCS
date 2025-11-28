@@ -4,10 +4,7 @@
 import os
 import asyncio
 import multiprocessing
-import tempfile
 import uuid
-import time
-import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import List, Tuple
@@ -48,7 +45,6 @@ DB_PATH = "users.db"
 TEMP_DIR = Path("temp_files")
 TEMP_DIR.mkdir(exist_ok=True)
 
-# Разрешённые модули (строго по ТЗ)
 ALLOWED_MODULES = {
     'random', 'datetime', 're', 'json', 'math', 'textwrap', 'base64', 'io',
     'os.path',
@@ -218,7 +214,16 @@ async def start(m: types.Message):
     if st == "banned":
         await m.answer("❌ Вы заблокированы.")
     elif st == "pending":
-        await m.answer("⏳ Ожидайте одобрения администратором.")
+        text = (
+            "👋 Привет! Я — бот-генератор документов.\n\n"
+            "Я могу создавать `.docx`, `.pptx`, `.pdf` — по вашему коду.\n"
+            "Например, таблицу с вопросами к Петру I или презентацию про Екатерину II.\n\n"
+            "✅ Чтобы начать:\n"
+            "1. Напишите код на Python (с использованием `docx`, `pptx`, `reportlab`)\n"
+            "2. Отправьте его текстом **или прикрепите как `.py` файл**\n\n"
+            "⏳ Ваш запрос на использование находится на рассмотрении. Пожалуйста, ожидайте одобрения администратора."
+        )
+        await m.answer(text)
         for aid in ADMIN_IDS:
             try:
                 await bot.send_message(
@@ -228,19 +233,33 @@ async def start(m: types.Message):
                 )
             except: pass
     else:
-        await m.answer("✅ Отправьте код (текстом или .py файлом) для генерации документа.")
+        text = (
+            "✅ Добро пожаловать!\n\n"
+            "Я — бот-генератор документов по вашему коду.\n"
+            "📄 Поддержка: `.docx`, `.pptx`, `.pdf` + изображения из интернета.\n\n"
+            "📤 Как отправить код:\n"
+            "• Напишите прямо в чат\n"
+            "• Или пришлите файл с расширением `.py`\n\n"
+            "❓ Подробнее — команда /info"
+        )
+        await m.answer(text)
 
 
 @dp.message(Command("info"))
 async def info(m: types.Message):
     await m.answer(
-        "📄 *Поддержка:*\n"
-        " • Форматы: `.docx`, `.pptx`, `.pdf`\n"
-        " • Изображения: `requests` + `PIL` (из URL)\n\n"
-        "🔧 *Разрешено:*\n"
+        "📄 *Бот создаёт документы по вашему Python-коду*\n\n"
+        "✅ *Поддерживаемые форматы:*\n"
+        " • `.docx` — через `python-docx`\n"
+        " • `.pptx` — через `python-pptx`\n"
+        " • `.pdf`  — через `reportlab`\n\n"
+        "🖼 *Изображения:*\n"
+        " • Загружайте по URL через `requests`\n"
+        " • Вставляйте в документ через `PIL.Image`\n\n"
+        "🔧 *Разрешённые модули:*\n"
         "`random`, `datetime`, `re`, `json`, `math`, `textwrap`, `base64`, `io`, `os.path`,\n"
         "`docx`, `pptx`, `reportlab`, `PIL`, `requests`\n\n"
-        "❌ *Запрещено:* `os`, `sys`, `subprocess`, `eval`, `exec` и др.",
+        "❌ *Запрещено:* `os`, `sys`, `subprocess`, `eval`, `exec`, `__import__` и др.",
         parse_mode="Markdown"
     )
 
@@ -258,14 +277,33 @@ async def profile(m: types.Message):
         return await m.answer("❌ Не найден.")
 
     st, un, fn = row
-    status_map = {"approved": "✅", "banned": "❌", "pending": "⏳"}
+    status_map = {"approved": "✅ одобрен", "banned": "❌ заблокирован", "pending": "⏳ ожидает"}
     await m.answer(
-        f"👤 {fn or '—'}\n"
-        f"🆔 `{m.from_user.id}`\n"
-        f"📇 @{un or '—'}\n"
-        f"🛡 {status_map.get(st, st)}",
+        f"👤 *Имя:* {fn or '—'}\n"
+        f"🆔 *ID:* `{m.from_user.id}`\n"
+        f"📇 *Username:* @{un or '—'}\n"
+        f"🛡 *Статус:* {status_map.get(st, st)}",
         parse_mode="Markdown"
     )
+
+
+@dp.message(Command("help"))
+async def help_cmd(m: types.Message):
+    if m.from_user.id not in ADMIN_IDS:
+        return  # не показываем обычным пользователям
+    help_text = (
+        "🛠 *Команды администратора*\n\n"
+        "🔹 `/players` — список всех пользователей (с пагинацией)\n"
+        "🔹 `/approve <ID или @username>` — одобрить пользователя\n"
+        "🔹 `/ban <ID>` — заблокировать пользователя\n"
+        "🔹 `/profile` — посмотреть свой профиль\n"
+        "🔹 `/info` — информация о возможностях бота\n\n"
+        "💡 В интерфейсе `/players`:\n"
+        " • ✅ Одобрить — дать доступ\n"
+        " • 🔄 Сбросить — вернуть в «ожидание»\n"
+        " • 🚫 Забанить / 🔓 Разбанить\n"
+    )
+    await m.answer(help_text, parse_mode="Markdown")
 
 
 # ——— ADMIN ———
@@ -343,18 +381,21 @@ async def user_menu(cb: types.CallbackQuery):
         kb.button(text="🚫 Забанить", callback_data=f"ban_{uid}")
     else:
         kb.button(text="🔓 Разбанить", callback_data=f"unban_{uid}")
-    kb.button(text="⬅️ Назад", callback_data="players_1")
+    kb.button(text="⬅️ Назад", callback_data="back_players")
     kb.adjust(2, 1)
 
+    status_text = {"approved": "✅ одобрен", "banned": "❌ заблокирован", "pending": "⏳ ожидает"}.get(st, st)
     await cb.message.edit_text(
-        f"👤 {name}\n🆔 `{uid}`\nСтатус: {'✅' if st == 'approved' else '❌' if st == 'banned' else '⏳'}",
+        f"👤 *{name}*\n"
+        f"🆔 `{uid}`\n"
+        f"🛡 Статус: {status_text}",
         parse_mode="Markdown",
         reply_markup=kb.as_markup()
     )
     await cb.answer()
 
 
-@dp.callback_query(lambda c: c.data == "players_1")
+@dp.callback_query(lambda c: c.data == "back_players")
 async def back(cb: types.CallbackQuery):
     if cb.from_user.id not in ADMIN_IDS: return
     users, total = await get_users(1)
@@ -445,7 +486,7 @@ async def handle(m: types.Message):
             with open(fp, encoding="utf-8") as fio:
                 code = fio.read()
         except Exception as e:
-            return await m.answer(f"❌ Ошибка чтения: {e}")
+            return await m.answer(f"❌ Ошибка чтения файла: {e}")
         finally:
             Path(fp).unlink(missing_ok=True)
     else:
@@ -454,25 +495,25 @@ async def handle(m: types.Message):
     if not code.strip():
         return await m.answer("❌ Код пуст.")
 
-    await m.answer("⏳ Выполняю... (макс. 30 сек)")
+    await m.answer("⏳ Выполняю ваш код... (макс. 30 секунд)")
 
     r_type, r_data = await safe_exec(code, uid)
 
     if r_type == "success":
         files = r_data
         if not files:
-            await m.answer("⚠️ Файлы не созданы.")
+            await m.answer("⚠️ Код выполнен, но файлы не созданы.")
         else:
             for fp in files:
                 try:
                     await m.answer_document(types.FSInputFile(fp))
                 except Exception as e:
-                    await m.answer(f"❌ Не отправлен: {Path(fp).name} — {e}")
+                    await m.answer(f"❌ Не удалось отправить `{Path(fp).name}`: {e}")
             asyncio.create_task(delete_files_after_delay(files))
     else:
-        msg = r_data[0] if r_data else "Ошибка"
+        msg = r_data[0] if r_data else "Неизвестная ошибка"
         if len(msg) > 3000: msg = msg[:2997] + "..."
-        await m.answer(f"❌ Ошибка:\n```\n{msg}\n```", parse_mode="Markdown")
+        await m.answer(f"❌ Ошибка выполнения:\n```\n{msg}\n```", parse_mode="Markdown")
 
 
 # ——— MAIN ———
