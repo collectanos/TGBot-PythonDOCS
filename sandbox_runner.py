@@ -10,10 +10,11 @@ import os
 import json as json_module
 from pathlib import Path
 
-# Сохраняем оригинальный __import__ ДО подмены
+# 🔒 Фиксируем оригинальные импорты ДО подмены
 _original_import = __import__
+_original_sys_modules = sys.modules.copy()
 
-# ⚠️ Только реально опасные модули запрещены
+# ⚠️ Только реально опасные модули
 FORBIDDEN_MODULES = {
     'subprocess', 'socket', 'threading', 'multiprocessing',
     'inspect', 'pickle', 'shutil', 'ctypes', 'code', 'compile',
@@ -51,18 +52,52 @@ def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 def main():
     if len(sys.argv) != 3:
-        print(json_module.dumps({"status": "error", "message": "Нужно 2 аргумента: temp_dir code_file"}))
+        print('{"status": "error", "message": "Нужно 2 аргумента: temp_dir code_file"}')
         return
 
     temp_dir = Path(sys.argv[1])
     code_file = Path(sys.argv[2])
     temp_dir.mkdir(parents=True, exist_ok=True)
 
-    # Подмена импорта
+    # 🔒 Подменяем импорт
     import builtins
     builtins.__import__ = safe_import
 
-    # Патчим save()
+    # 🔒 Добавляем разрешённые модули в sys.modules вручную
+    try:
+        import json
+        sys.modules['json'] = json
+    except: pass
+    try:
+        import random
+        sys.modules['random'] = random
+    except: pass
+    try:
+        import datetime
+        sys.modules['datetime'] = datetime
+    except: pass
+    try:
+        import re
+        sys.modules['re'] = re
+    except: pass
+    try:
+        import math
+        sys.modules['math'] = math
+    except: pass
+    try:
+        import textwrap
+        sys.modules['textwrap'] = textwrap
+    except: pass
+    try:
+        import base64
+        sys.modules['base64'] = base64
+    except: pass
+    try:
+        import io
+        sys.modules['io'] = io
+    except: pass
+
+    # 🛠 Патчим save()
     try:
         from docx import Document
         orig = Document.save
@@ -96,14 +131,14 @@ def main():
         canvas.Canvas.__init__ = patched
     except: pass
 
-    # Подготавливаем глобальные переменные — ЗАРАНЕЕ ИМПОРТИРУЕМ ВСЁ
+    # 🧪 Глобальные переменные — ВСЁ В РУЧНУЮ
     g = {
         '__builtins__': __builtins__,
         '__name__': '__main__',
         'json': json_module,
     }
 
-    # Импортируем по одному — без exec
+    # Добавляем модули по одному
     try: g['random'] = __import__('random')
     except: pass
     try: g['datetime'] = __import__('datetime')
@@ -131,9 +166,13 @@ def main():
         files = [str(f) for f in temp_dir.iterdir() if f.is_file()]
         print(json_module.dumps({"status": "success", "files": files}))
     except Exception as e:
-        # ❗ НЕ ИСПОЛЬЗУЕМ traceback — он вызывает рекурсию
-        msg = f"{type(e).__name__}: {e}"
-        print(json_module.dumps({"status": "error", "message": msg}))
+        # 🔥 Абсолютно безопасная обработка ошибок — НИКАКИХ импортов!
+        error_type = type(e).__name__
+        error_msg = str(e)
+        if len(error_msg) > 200:
+            error_msg = error_msg[:200] + "..."
+        # Выводим JSON БЕЗ использования json.dumps (на случай, если json сломан)
+        print(f'{{"status": "error", "message": "{error_type}: {error_msg}"}}')
 
 
 if __name__ == "__main__":
