@@ -12,31 +12,31 @@ import json
 import traceback
 from pathlib import Path
 
-# Сохраняем ОРИГИНАЛЬНЫЙ __import__ до подмены
+# Сохраняем оригинальный __import__ ДО подмены
 _original_import = __import__
 
-# Разрешённые модули
-ALLOWED_MODULES = {
-    'random', 'datetime', 're', 'json', 'math', 'textwrap', 'base64', 'io',
-    'os.path',
-    'docx', 'pptx', 'reportlab', 'PIL', 'requests',
+# ⚠️ ЗАПРЕЩЁННЫЕ модули (всё остальное — разрешено)
+FORBIDDEN_MODULES = {
+    'os', 'sys', 'subprocess', 'socket', 'threading', 'multiprocessing',
+    'inspect', 'pickle', 'shutil', 'ctypes', 'builtins', 'code', 'compile',
+    'exec', 'eval', '__import__', 'runpy', 'importlib.util',
 }
 
 def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
-    # Разрешаем 'os' → только os.path
+    # 🔥 Запрещаем опасные модули
+    base_name = name.split('.')[0]
+    if base_name in FORBIDDEN_MODULES:
+        raise ImportError(f"❌ Запрещён опасный модуль: {name}")
+    
+    # Разрешаем 'os' → только os.path (подмена)
     if name == 'os':
         import types
         import os as real_os
         fake_os = types.SimpleNamespace()
         fake_os.path = real_os.path
         return fake_os
-    
-    # Проверяем базовое имя модуля
-    base_name = name.split('.')[0]
-    if base_name not in ALLOWED_MODULES:
-        raise ImportError(f"❌ Запрещён импорт: {name}")
-    
-    # Используем ОРИГИНАЛЬНЫЙ __import__, а не рекурсивный
+
+    # Всё остальное — разрешаем через оригинальный импорт
     return _original_import(name, globals, locals, fromlist, level)
 
 def main():
@@ -46,14 +46,13 @@ def main():
 
     temp_dir = Path(sys.argv[1])
     code_file = Path(sys.argv[2])
-
     temp_dir.mkdir(parents=True, exist_ok=True)
 
     # Подменяем импорт
     import builtins
     builtins.__import__ = safe_import
 
-    # Патчим save() методы
+    # Патчим save() для docx
     try:
         from docx import Document
         orig_save = Document.save
@@ -66,6 +65,7 @@ def main():
     except Exception:
         pass
 
+    # Патчим save() для pptx
     try:
         from pptx import Presentation
         orig_save = Presentation.save
@@ -78,6 +78,7 @@ def main():
     except Exception:
         pass
 
+    # Патчим Canvas для reportlab
     try:
         from reportlab.pdfgen import canvas
         orig_init = canvas.Canvas.__init__
@@ -90,17 +91,20 @@ def main():
     except Exception:
         pass
 
-    # Подготавливаем глобальные переменные
+    # Глобальные переменные для exec
     g = {
         '__builtins__': __builtins__,
         '__name__': '__main__',
         'BytesIO': __import__('io').BytesIO,
         'StringIO': __import__('io').StringIO,
     }
-    
-    # Добавляем разрешённые встроенные модули
-    for mod_name in ['random', 'datetime', 're', 'json', 'math', 'textwrap', 'base64']:
-        g[mod_name] = __import__(mod_name)
+
+    # Добавляем часто используемые модули (безопасные)
+    for mod in ['random', 'datetime', 're', 'json', 'math', 'textwrap', 'base64']:
+        try:
+            g[mod] = __import__(mod)
+        except Exception:
+            pass  # Игнорируем, если не удалось (редко)
 
     try:
         with open(code_file, 'r', encoding='utf-8') as f:
