@@ -3,7 +3,7 @@
 
 import os
 import asyncio
-import multiprocessing
+import sys
 import uuid
 import traceback
 from pathlib import Path
@@ -47,12 +47,6 @@ DB_PATH = "users.db"
 TEMP_DIR = Path("temp_files")
 TEMP_DIR.mkdir(exist_ok=True)
 
-ALLOWED_MODULES = {
-    'random', 'datetime', 're', 'json', 'math', 'textwrap', 'base64', 'io',
-    'os.path',
-    'docx', 'pptx', 'reportlab', 'PIL', 'requests',
-}
-
 # ==============================
 # 🗃 DATABASE INITIALIZATION
 # ==============================
@@ -85,158 +79,68 @@ async def init_db():
     print("✅ База данных инициализирована.")
 
 # ==============================
-# 🛡 SANDBOX: SAFE CODE EXECUTION
+# 🛡 SANDBOX (через subprocess + sandbox_runner.py)
 # ==============================
-
-def _run_code_in_sandbox(code: str, temp_subdir: str, result_pipe):
-    """
-    Выполняется в отдельном процессе.
-    Перехватывает импорты, патчит save(), возвращает список созданных файлов.
-    """
-    try:
-        # --- 1. Ограниченные импорты ---
-        import builtins
-
-        original_import = builtins.__import__
-
-        def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
-            # Разрешаем 'os.path', но не 'os'
-            if name == 'os':
-                import types
-                import os as real_os
-                fake_os = types.SimpleNamespace()
-                fake_os.path = real_os.path
-                return fake_os
-            if name.split('.')[0] not in ALLOWED_MODULES:
-                raise ImportError(f"⚠️ Запрещён импорт: {name}")
-            return original_import(name, globals, locals, fromlist, level)
-
-        builtins.__import__ = safe_import
-
-        # --- 2. Создаём изолированное окружение ---
-        import io as _io
-        import os as _os
-
-        # Временная папка для файлов пользователя
-        safe_temp = Path(temp_subdir)
-        safe_temp.mkdir(parents=True, exist_ok=True)
-
-        # --- 3. Патчим save() методы ---
-        # Для docx
-        try:
-            from docx import Document
-            original_doc_save = Document.save
-
-            def patched_doc_save(self, filename):
-                # Обрезаем путь — только имя файла
-                safe_name = _os.path.basename(str(filename))
-                full_path = safe_temp / safe_name
-                # Разрешаем только нужные расширения
-                if not safe_name.lower().endswith(('.docx', '.pdf', '.pptx', '.png', '.jpg', '.jpeg')):
-                    raise ValueError("❌ Только .docx, .pptx, .pdf, .png, .jpg разрешены")
-                return original_doc_save(self, str(full_path))
-            Document.save = patched_doc_save
-        except Exception:
-            pass  # Если docx не используется — ок
-
-        # Для pptx
-        try:
-            from pptx import Presentation
-            original_pptx_save = Presentation.save
-
-            def patched_pptx_save(self, filename):
-                safe_name = _os.path.basename(str(filename))
-                full_path = safe_temp / safe_name
-                if not safe_name.lower().endswith(('.pptx', '.pdf')):
-                    raise ValueError("❌ Только .pptx, .pdf разрешены")
-                return original_pptx_save(self, str(full_path))
-            Presentation.save = patched_pptx_save
-        except Exception:
-            pass
-
-        # Для reportlab (Canvas)
-        try:
-            from reportlab.pdfgen import canvas
-            from reportlab.lib.pagesizes import letter
-
-            original_canvas_init = canvas.Canvas.__init__
-
-            def patched_canvas_init(self, filename, *args, **kwargs):
-                safe_name = _os.path.basename(str(filename))
-                full_path = safe_temp / safe_name
-                if not safe_name.lower().endswith('.pdf'):
-                    raise ValueError("❌ Только .pdf для Canvas")
-                # Вызываем оригинальный init с безопасным путём
-                return original_canvas_init(self, str(full_path), *args, **kwargs)
-
-            canvas.Canvas.__init__ = patched_canvas_init
-        except Exception:
-            pass
-
-        # --- 4. Глобальные переменные для кода ---
-        sandbox_globals = {
-            '__builtins__': __builtins__,
-            '__name__': '__main__',
-        }
-
-        # Добавляем разрешённые модули
-        for mod in ['random', 'datetime', 're', 'json', 'math', 'textwrap', 'base64']:
-            sandbox_globals[mod] = __import__(mod)
-
-        # Добавляем io.BytesIO/StringIO
-        sandbox_globals['BytesIO'] = _io.BytesIO
-        sandbox_globals['StringIO'] = _io.StringIO
-
-        # --- 5. Выполняем код ---
-        exec(code, sandbox_globals)
-
-        # --- 6. Собираем все файлы в temp_subdir ---
-        generated_files = [
-            str(f) for f in safe_temp.iterdir()
-            if f.is_file() and f.suffix.lower() in ['.docx', '.pptx', '.pdf', '.png', '.jpg', '.jpeg']
-        ]
-
-        result_pipe.send(("success", generated_files))
-
-    except Exception as e:
-        import traceback
-        result_pipe.send(("error", f"{type(e).__name__}: {str(e)}\n\n{traceback.format_exc(limit=3)}"))
-    finally:
-        # Восстанавливаем __import__, если нужно (в процессе — не критично)
-        pass
-
 
 async def safe_exec(code: str, user_id: int) -> Tuple[str, List[str]]:
     """
-    Запускает код в изолированном процессе.
-    Возвращает: ("success", [paths]) или ("error", message)
+    Запускает код в изолированном subprocess.
+    Возвращает: ("success", [paths]) или ("error", [message])
     """
     temp_subdir = TEMP_DIR / f"{user_id}_{uuid.uuid4().hex}"
-    parent_conn, child_conn = multiprocessing.Pipe()
-
-    # Запускаем процесс
-    proc = multiprocessing.Process(
-        target=_run_code_in_sandbox,
-        args=(code, str(temp_subdir), child_conn),
-        daemon=True
-    )
-    proc.start()
-
+    temp_subdir.mkdir(parents=True, exist_ok=True)
+    
+    code_file = temp_subdir / "code.py"
+    runner_path = Path(__file__).parent / "sandbox_runner.py"
+    
+    if not runner_path.exists():
+        return "error", [f"❌ Файл sandbox_runner.py не найден: {runner_path}"]
+    
+    # Сохраняем код во временный файл
     try:
-        # Ждём максимум 30 секунд
-        if parent_conn.poll(30):
-            result = parent_conn.recv()
-        else:
-            proc.terminate()
-            proc.join(2)
-            if proc.is_alive():
-                proc.kill()
-            return "error", ["⚠️ Превышено время выполнения (30 сек)"]
-        return result
+        with open(code_file, "w", encoding="utf-8") as f:
+            f.write(code)
     except Exception as e:
-        return "error", [f"❌ Ошибка запуска: {e}"]
-    finally:
-        proc.join(timeout=1)
+        return "error", [f"❌ Ошибка записи кода: {e}"]
+    
+    # Запускаем изолированный процесс
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, str(runner_path), str(temp_subdir), str(code_file),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(Path(__file__).parent)
+        )
+        
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return "error", ["⚠️ Превышено время выполнения (30 секунд)"]
+        
+        # Декодируем вывод
+        stdout_str = stdout.decode('utf-8', errors='replace').strip()
+        stderr_str = stderr.decode('utf-8', errors='replace').strip()
+        
+        if not stdout_str:
+            return "error", [f"Пустой stdout. stderr: {stderr_str[:500]}"]
+        
+        # Парсим JSON-результат
+        try:
+            result = json.loads(stdout_str)
+        except Exception as e:
+            return "error", [f"❌ Некорректный JSON от sandbox:\n{stdout_str[:1000]}\n\nОшибка: {e}"]
+        
+        if result.get("status") == "success":
+            files = result.get("files", [])
+            return "success", files
+        else:
+            msg = result.get("message", "Неизвестная ошибка sandbox")
+            return "error", [msg]
+    
+    except Exception as e:
+        return "error", [f"❌ Ошибка запуска sandbox: {e}\nstderr: {stderr_str[:300]}"]
 
 
 # ==============================
@@ -266,9 +170,7 @@ dp = Dispatcher(storage=MemoryStorage())
 # ==============================
 
 async def ensure_user_registered(user: types.User):
-    # 🔥 Если пользователь — админ, статус сразу 'approved'
     status = 'approved' if user.id in ADMIN_IDS else 'pending'
-    
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT OR IGNORE INTO users (user_id, username, first_name, status)
@@ -278,10 +180,8 @@ async def ensure_user_registered(user: types.User):
 
 
 async def get_user_status(user_id: int) -> str:
-    # 🔥 Админ всегда имеет статус 'approved'
     if user_id in ADMIN_IDS:
         return "approved"
-    
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT status FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
@@ -311,7 +211,6 @@ async def cmd_start(message: types.Message):
             "⏳ Ваш запрос на использование отправлен администратору.\n"
             "Пожалуйста, ожидайте одобрения."
         )
-        # Уведомляем админов
         for admin_id in ADMIN_IDS:
             try:
                 await bot.send_message(
@@ -325,7 +224,7 @@ async def cmd_start(message: types.Message):
                 )
             except Exception:
                 pass
-    else:  # approved (включая админов)
+    else:
         await message.answer(
             "✅ Добро пожаловать!\n"
             "Отправьте Python-код (текстом или .py файлом), чтобы сгенерировать документ.\n"
@@ -368,7 +267,6 @@ async def cmd_profile(message: types.Message):
                 return
 
     status, username, first_name = row
-    # 🔥 Для админа — всегда approved
     if message.from_user.id in ADMIN_IDS:
         status = "approved"
         
@@ -387,17 +285,14 @@ async def cmd_profile(message: types.Message):
 # 👑 ADMIN COMMANDS
 # ==============================
 
-# Пагинация пользователей
 USERS_PER_PAGE = 5
 
 async def get_paginated_users(page: int = 1):
     offset = (page - 1) * USERS_PER_PAGE
+    placeholders = ','.join('?' * len(ADMIN_IDS))
     async with aiosqlite.connect(DB_PATH) as db:
-        # Общее количество (кроме админов)
-        async with db.execute("SELECT COUNT(*) FROM users WHERE user_id NOT IN ({})".format(','.join('?'*len(ADMIN_IDS))), ADMIN_IDS) as cursor:
+        async with db.execute(f"SELECT COUNT(*) FROM users WHERE user_id NOT IN ({placeholders})", ADMIN_IDS) as cursor:
             total = (await cursor.fetchone())[0]
-        # Пользователи (без админов)
-        placeholders = ','.join('?'*len(ADMIN_IDS))
         async with db.execute(f"""
             SELECT user_id, username, first_name, status 
             FROM users 
@@ -416,13 +311,9 @@ def build_players_keyboard(users: List[tuple], page: int, total: int) -> InlineK
         if len(name) > 25:
             name = name[:22] + "..."
         status_icon = {"approved": "✅", "banned": "❌", "pending": "⏳"}.get(status, "❓")
-        builder.button(
-            text=f"{status_icon} {name}",
-            callback_data=f"user_{user_id}"
-        )
+        builder.button(text=f"{status_icon} {name}", callback_data=f"user_{user_id}")
     builder.adjust(1)
 
-    # Пагинация
     total_pages = (total + USERS_PER_PAGE - 1) // USERS_PER_PAGE
     nav_buttons = []
     if page > 1:
@@ -466,9 +357,7 @@ async def cb_user_menu(callback: types.CallbackQuery):
         return
     user_id = int(callback.data.split("_")[1])
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("""
-            SELECT username, first_name, status FROM users WHERE user_id = ?
-        """, (user_id,)) as cursor:
+        async with db.execute("SELECT username, first_name, status FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
     if not row:
         await callback.answer("❌ Пользователь не найден", show_alert=True)
@@ -509,7 +398,6 @@ async def cb_back_players(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# Обработка действий
 @dp.callback_query(lambda c: c.data.startswith(("approve_", "ban_", "unban_", "reset_")))
 async def cb_action(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
@@ -532,11 +420,9 @@ async def cb_action(callback: types.CallbackQuery):
         await db.commit()
 
     await callback.answer(f"✅ Действие выполнено", show_alert=True)
-    # Обновляем меню
     await cb_user_menu(callback)
 
 
-# Ручное одобрение по ID/username
 @dp.message(Command("approve"))
 async def cmd_approve(message: types.Message, command: CommandObject):
     if message.from_user.id not in ADMIN_IDS:
@@ -548,10 +434,8 @@ async def cmd_approve(message: types.Message, command: CommandObject):
     target = command.args.strip()
     user_id = None
 
-    # По ID
     if target.isdigit():
         user_id = int(target)
-    # По username
     elif target.startswith("@"):
         username = target[1:]
         async with aiosqlite.connect(DB_PATH) as db:
@@ -624,35 +508,30 @@ async def handle_code(message: types.Message):
         await message.answer(text)
         return
 
-    # Получаем код
     code = None
     if message.document:
-        # Скачиваем .py файл
         file = await bot.get_file(message.document.file_id)
-        file_path = f"/tmp/{uuid.uuid4().hex}.py"
-        await bot.download_file(file.file_path, file_path)
+        file_path = f"/tmp/{uuid.uuid4().hex}.py" if os.name != 'nt' else f"C:\\Temp\\{uuid.uuid4().hex}.py"
         try:
+            await bot.download_file(file.file_path, file_path)
             with open(file_path, "r", encoding="utf-8") as f:
                 code = f.read()
         except Exception as e:
-            await message.answer(f"❌ Ошибка чтения файла: {e}")
-            return
+            return await message.answer(f"❌ Ошибка чтения файла: {e}")
         finally:
             Path(file_path).unlink(missing_ok=True)
     else:
         code = message.text
 
     if not code.strip():
-        await message.answer("❌ Код пуст.")
-        return
+        return await message.answer("❌ Код пуст.")
 
     await message.answer("⏳ Запускаю ваш код... (макс. 30 сек)")
 
-    # Запускаем в песочнице
-    result_type, result_data = await safe_exec(code, user_id)
+    r_type, r_data = await safe_exec(code, user_id)
 
-    if result_type == "success":
-        files = result_data
+    if r_type == "success":
+        files = r_data
         if not files:
             await message.answer("⚠️ Код выполнен, но файлы не созданы.")
         else:
@@ -661,14 +540,12 @@ async def handle_code(message: types.Message):
                     await message.answer_document(types.FSInputFile(file_path))
                 except Exception as e:
                     await message.answer(f"❌ Не удалось отправить файл: {e}")
-            # Удаляем через 15 мин
             asyncio.create_task(delete_files_after_delay(files, 900))
     else:
-        error_msg = result_data[0] if result_data else "Неизвестная ошибка"
-        # Обрезаем длинные трейсы
-        if len(error_msg) > 3000:
-            error_msg = error_msg[:2997] + "..."
-        await message.answer(f"❌ Ошибка выполнения:\n```\n{error_msg}\n```", parse_mode="Markdown")
+        msg = r_data[0] if r_data else "Неизвестная ошибка"
+        if len(msg) > 3000:
+            msg = msg[:2997] + "..."
+        await message.answer(f"❌ Ошибка выполнения:\n```\n{msg}\n```", parse_mode="Markdown")
 
 
 # ==============================
