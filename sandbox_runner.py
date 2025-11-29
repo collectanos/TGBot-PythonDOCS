@@ -12,8 +12,8 @@ import json
 import traceback
 from pathlib import Path
 
-# Добавляем текущую папку в путь (для импортов)
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Сохраняем ОРИГИНАЛЬНЫЙ __import__ до подмены
+_original_import = __import__
 
 # Разрешённые модули
 ALLOWED_MODULES = {
@@ -22,31 +22,38 @@ ALLOWED_MODULES = {
     'docx', 'pptx', 'reportlab', 'PIL', 'requests',
 }
 
-def safe_import(name, *args, **kwargs):
+def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+    # Разрешаем 'os' → только os.path
     if name == 'os':
-        import types, os as real_os
+        import types
+        import os as real_os
         fake_os = types.SimpleNamespace()
         fake_os.path = real_os.path
         return fake_os
-    if name.split('.')[0] not in ALLOWED_MODULES:
+    
+    # Проверяем базовое имя модуля
+    base_name = name.split('.')[0]
+    if base_name not in ALLOWED_MODULES:
         raise ImportError(f"❌ Запрещён импорт: {name}")
-    return __import__(name, *args, **kwargs)
+    
+    # Используем ОРИГИНАЛЬНЫЙ __import__, а не рекурсивный
+    return _original_import(name, globals, locals, fromlist, level)
 
 def main():
     if len(sys.argv) != 3:
         print(json.dumps({"status": "error", "message": "UsageId: sandbox_runner.py <temp_dir> <code_file>"}))
-        sys.exit(1)
+        return
 
     temp_dir = Path(sys.argv[1])
     code_file = Path(sys.argv[2])
 
     temp_dir.mkdir(parents=True, exist_ok=True)
 
-    # Патчим импорты
+    # Подменяем импорт
     import builtins
     builtins.__import__ = safe_import
 
-    # Патчим save() — только для текущего процесса
+    # Патчим save() методы
     try:
         from docx import Document
         orig_save = Document.save
@@ -56,7 +63,7 @@ def main():
                 raise ValueError("❌ Только .docx/.pptx/.pdf/.png/.jpg")
             return orig_save(self, str(temp_dir / filename))
         Document.save = patched_save
-    except Exception as e:
+    except Exception:
         pass
 
     try:
@@ -68,30 +75,32 @@ def main():
                 raise ValueError("❌ Только .pptx/.pdf")
             return orig_save(self, str(temp_dir / filename))
         Presentation.save = patched_save
-    except Exception as e:
+    except Exception:
         pass
 
     try:
         from reportlab.pdfgen import canvas
         orig_init = canvas.Canvas.__init__
-        def patched_init(self, filename, *a, **kw):
+        def patched_init(self, filename, *args, **kwargs):
             filename = os.path.basename(str(filename))
             if not filename.lower().endswith('.pdf'):
                 raise ValueError("❌ Только .pdf")
-            return orig_init(self, str(temp_dir / filename), *a, **kw)
+            return orig_init(self, str(temp_dir / filename), *args, **kwargs)
         canvas.Canvas.__init__ = patched_init
-    except Exception as e:
+    except Exception:
         pass
 
-    # Глобальные
+    # Подготавливаем глобальные переменные
     g = {
         '__builtins__': __builtins__,
         '__name__': '__main__',
         'BytesIO': __import__('io').BytesIO,
         'StringIO': __import__('io').StringIO,
     }
-    for mod in ['random', 'datetime', 're', 'json', 'math', 'textwrap', 'base64']:
-        g[mod] = __import__(mod)
+    
+    # Добавляем разрешённые встроенные модули
+    for mod_name in ['random', 'datetime', 're', 'json', 'math', 'textwrap', 'base64']:
+        g[mod_name] = __import__(mod_name)
 
     try:
         with open(code_file, 'r', encoding='utf-8') as f:
@@ -103,6 +112,7 @@ def main():
     except Exception as e:
         msg = f"{type(e).__name__}: {e}\n\n{traceback.format_exc(limit=2)}"
         print(json.dumps({"status": "error", "message": msg}))
+
 
 if __name__ == "__main__":
     main()
